@@ -1,0 +1,80 @@
+{
+  "fit": {
+    "u": 180518.43731314118,
+    "v": 5.591209072812979,
+    "coarse_u": 180518.43731314118,
+    "coarse_v": 5.591209072812979,
+    "r0_mm_at_bit": 24.063107693841722,
+    "pitch_um_at_bit": 0.7453081694059701,
+    "bit_nm_assumed": 133.3,
+    "note": "angles depend only on u and v; any bit length with r0 = u*b and pitch = v*b gives the same image",
+    "dis_equivalent": {
+      "bit_nm": 133.3,
+      "inner_radius_mm": 24.063107693841722,
+      "outer_radius_mm_for_total_sectors": {
+        "2295104": 58.19809538359914,
+        "2298496": 58.2337385717282
+      },
+      "note": "DiscImageStudio builds its spiral from inner radius, outer radius and track length (total sectors x 38688 x bit); use the outer radius for your disc's sector count"
+    },
+    "angle_span_mm": [
+      24.0,
+      58.0
+    ],
+    "nominal_error_deg": 52217.500509772275,
+    "angle_sigma_deg": 0.16295778369026698,
+    "u_sigma": 0.01329479163775032,
+    "v_sigma": 5.190289597813634e-07,
+    "measured_span_mm": [
+      25.756,
+      54.486
+    ],
+    "angle_sigma_measured_span_deg": 0.13660613163382274,
+    "c_deg": 0.1738598901351857,
+    "chi2_per_dof": 0.9577071760385207,
+    "residual_rms_deg": 0.18356035458012707,
+    "period_ms": 25.38253397809961,
+    "reference_lba": 689280
+  },
+  "cache": {
+    "lba": 1148928,
+    "sectors": 1,
+    "plain": {
+      "n": 40,
+      "p50_us": 412.8,
+      "p95_us": 630.7,
+      "p99_us": 225936.2,
+      "min_us": 317.0,
+      "max_us": 225936.2,
+      "failed": 0
+    },
+    "fua": {
+      "n": 40,
+      "p50_us": 50668.1,
+      "p95_us": 50784.8,
+      "p99_us": 57868.8,
+      "min_us": 50495.8,
+      "max_us": 57868.8,
+      "failed": 0
+    },
+    "plain_served_from_cache": true,
+    "fua_reads_media": true,
+    "flush_then_read_media": false,
+    "strategy": "fua"
+  },
+  "setup": {
+    "profile": "0x0010",
+    "profile_name": "DVD-ROM",
+    "family": "dvd",
+    "block_sectors": 16,
+    "last_lba": 2297887,
+    "first_track_audio": false,
+    "read_method": "read12"
+  },
+  "set_cd_speed": {
+    "requested_kBps": 5540,
+    "pure_cav": false,
+    "status": 0,
+    "sense": ""
+  }
+}

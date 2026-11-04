@@ -1,0 +1,32 @@
+{
+  "preset": {
+    "id": "dvd-r-ritekf1-uj260af",
+    "displayName": "DVD-R RITEKF1 (drive-timing, MATSHITA UJ260AF)",
+    "description": "Drive-timing calibration (discprobe); fitted over 25.8-54.5 mm, max angle difference to the measured map 0.001 deg",
+    "totalSectors": 2297888,
+    "innerRadiusMm": 24.063112764601303,
+    "outerRadiusMm": 58.22734794029809,
+    "channelBitLengthNm": 133.3,
+    "pitchLinear": -2.2674113398095187e-10,
+    "pitchQuadratic": -1.4138905292380054e-09,
+    "pitchCubic": 3.516750598785811e-09
+  },
+  "fit": {
+    "innerRadiusMm": 24.063112764601303,
+    "outerRadiusMm": 58.22734794029809,
+    "pitchLinear": -2.2674113398095187e-10,
+    "pitchQuadratic": -1.4138905292380054e-09,
+    "pitchCubic": 3.516750598785811e-09,
+    "p0_um": 0.7453080005882494,
+    "fit_range_mm": [
+      25.8,
+      54.5
+    ],
+    "max_angle_diff_deg": 0.0009818562466916755,
+    "rms_angle_diff_deg": 0.0003390952505609068,
+    "peak_to_peak_angle_diff_deg": 0.0015531968567001346
+  },
+  "source": {
+    "geo": "summary.json"
+  }
+}

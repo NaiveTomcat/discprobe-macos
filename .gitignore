@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# Build output of the macOS SCSI pass-through helper (tools/mac/build.sh)
+tools/mac/build/
+# Local measurement output
+results/
+iso/
+scans/
