@@ -27,8 +27,14 @@ DiscImageStudio 用"内半径 + 外半径 + 扇区数 + 三次轨距形状"描�
 
 ## 快速开始
 
-要求：macOS 13 以上、Python 3.10+、Xcode 命令行工具（`xcode-select --install`，只需要 clang 和 SDK 头文件）。
-**不需要 root，也不要加 `sudo`。**
+两条路都行，**都不需要 root，也不要加 `sudo`**：
+
+- **用 release 包**（推荐，不用任何编译器）：下载 `discprobe-macos-<版本>.tar.gz` 解开即可。包里的
+  `tools/mac/build/discprobe-spt` 是编译好的 arm64 + x86_64 通用二进制，已用 Developer ID 签名并公证。
+- **从源码跑**：`git clone` 之后第一次运行会自动用 clang 编译这个 helper，这时需要 Xcode 命令行工具
+  （`xcode-select --install`）。
+
+两种都只要 Python 3.10+（macOS 12.3 起系统不再预装 Python 3；装了 Xcode 工具链或自己装一个即可）。
 
 ```bash
 git clone https://github.com/NaiveTomcat/discprobe-macos
@@ -38,7 +44,11 @@ python3 -m discprobe list              # 看驱动器：disk10  MATSHITA BD-MLT 
 python3 -m discprobe info --drive disk10
 ```
 
-`list` 第一次运行会自动编译 helper（`tools/mac/build.sh`），也可以手动跑一遍。
+从源码跑时 `list` 第一次会自动编译 helper（`tools/mac/build.sh`）；用 release 包时那一步已经有现成的二进制。
+
+**如果 macOS 拦住了 helper**（下载来的文件带 quarantine 标记，Gatekeeper 会拒跑命令行二进制，即使已签名公证）：
+程序会自己清掉那个下载标记并在 stderr 打一行提示，不需要 `sudo`，也不会改动文件内容。手动等价命令是
+`xattr -d com.apple.quarantine tools/mac/build/discprobe-spt`。
 
 ## 一张盘的标准流程
 

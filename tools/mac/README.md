@@ -80,6 +80,18 @@ tools/mac/build/discprobe-spt serve [--device diskN]
 - 数据长度超过 128 KiB 会被截断（`MAX_TRANSFER`）；超出部分不会发给驱动器。
 - 一台机器最多认 16 台驱动器（`MAX_DEVS`）。
 
+## 签名、公证与 Gatekeeper
+
+release 里的 `discprobe-spt` 用 Developer ID Application 证书签了名（hardened runtime + 时间戳），
+并把整份二进制提交给 Apple 公证服务（`notarytool`，状态 Accepted）。
+
+但**签名公证并不能免除 Gatekeeper 对命令行二进制的拦截**：公证票据无法 staple 到一个裸可执行文件里，
+所以从浏览器下载的副本仍带 `com.apple.quarantine`，第一次执行会被直接 SIGKILL。`macscsi._runnable()`
+的处理是：发现这个标记就先 `xattr -d` 清掉（不需要任何权限），清不掉（例如目录只读）就把字节复制一份到
+`~/Library/Caches/discprobe/` 再执行。两种情况都会在 stderr 说明，且不改动下载文件的内容。
+
+从 `git clone` 或 `curl` 拿到的文件没有这个标记，不会触发。
+
 ## 独占与权限
 
 - 打开时调用 `ObtainExclusiveAccess`。失败就先通过 DiskArbitration 把这块盘卸掉（最多等 6 秒），然后再试一次。

@@ -23,10 +23,13 @@ needed for this on the drives tested so far.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import struct
 import subprocess
+import sys
 
 from .scsi import DATA_IN, DATA_NONE, DATA_OUT, ScsiResult, Sense, check_allowed
 
@@ -47,21 +50,72 @@ def helper_path() -> str:
     return os.path.join(root, "tools", "mac", "build", "discprobe-spt")
 
 
+def _gatekeeper_hint(path: str) -> str:
+    return (f"macOS refused to run {path}. The helper in the release is signed and notarized; a copy "
+            f"that came from a browser download may still carry the quarantine flag, which clears "
+            f"with: xattr -d com.apple.quarantine {path}")
+
+
+def _quarantined(path: str) -> bool:
+    return subprocess.run(["xattr", "-p", "com.apple.quarantine", path],
+                          capture_output=True).returncode == 0
+
+
+def _runnable(path: str) -> str:
+    """A copy of the helper that macOS will actually execute.
+
+    A downloaded file carries com.apple.quarantine, and Gatekeeper refuses to run a
+    quarantined executable unless it is a signed bundle with a stapled ticket. A bare
+    command-line binary cannot carry a stapled ticket - notarizing it is accepted by
+    Apple but still gets killed on first exec - so the download flag has to go. Both
+    routes below are the same thing the user would do by hand, need no privileges, and
+    leave the downloaded program untouched in content.
+    """
+    if not os.path.exists(path) or not _quarantined(path):
+        return path
+    cleared = subprocess.run(["xattr", "-d", "com.apple.quarantine", path], capture_output=True)
+    if cleared.returncode == 0 and not _quarantined(path):
+        print(f"note: cleared the download flag on {path} (macOS refuses to run a quarantined "
+              f"command-line binary); no privileges were needed", file=sys.stderr)
+        return path
+    # Fall back to a copy for installs we cannot write to: write the bytes by hand, since a
+    # system-assisted copy may carry the attribute along.
+    cache = os.path.join(os.path.expanduser("~/Library/Caches"), "discprobe")
+    try:
+        os.makedirs(cache, exist_ok=True)
+        with open(path, "rb") as fh:
+            data = fh.read()
+        target = os.path.join(cache, f"discprobe-spt-{hashlib.sha256(data).hexdigest()[:12]}")
+        if not os.path.exists(target):
+            with open(target, "wb") as fh:
+                fh.write(data)
+            os.chmod(target, 0o755)
+            print(f"note: {path} carries the download flag; using the identical copy at {target}",
+                  file=sys.stderr)
+        return target
+    except OSError as e:
+        raise OSError(2, f"{_gatekeeper_hint(path)} (and copying it somewhere runnable failed: {e})") from e
+
+
 def _ensure_helper() -> str:
     path = helper_path()
     if os.path.exists(path):
         return path
     if os.environ.get(HELPER_ENV):
         raise OSError(2, f"{HELPER_ENV} points at {path}, which does not exist")
-    script = os.path.join(os.path.dirname(path), "..", "build.sh")
-    script = os.path.normpath(script)
-    if os.path.exists(script):
-        proc = subprocess.run(["/bin/sh", script], capture_output=True, text=True)
-        if proc.returncode == 0 and os.path.exists(path):
-            return path
-        raise OSError(2, "could not build the macOS helper "
-                         f"({script}): {proc.stderr.strip() or proc.stdout.strip()}")
-    raise OSError(2, f"the macOS helper is missing: expected {path}")
+    script = os.path.normpath(os.path.join(os.path.dirname(path), "..", "build.sh"))
+    if not os.path.exists(script):
+        raise OSError(2, f"the macOS helper is missing: expected {path}")
+    if shutil.which("clang") is None:
+        raise OSError(2, "the macOS helper is not built and there is no C compiler here. Either install "
+                         "the Xcode command line tools (`xcode-select --install`), or download "
+                         "discprobe-spt-darwin-universal from the release page and put it at "
+                         f"{path} (or point {HELPER_ENV} at it)")
+    proc = subprocess.run(["/bin/sh", script], capture_output=True, text=True)
+    if proc.returncode == 0 and os.path.exists(path):
+        return path
+    raise OSError(2, "could not build the macOS helper "
+                     f"({script}): {proc.stderr.strip() or proc.stdout.strip()}")
 
 
 def normalise_spec(spec: str | None) -> str:
@@ -82,7 +136,10 @@ def normalise_spec(spec: str | None) -> str:
 
 def list_optical_drives() -> list[dict]:
     """Every optical drive the helper can see, with vendor, model and BSD name."""
-    proc = subprocess.run([_ensure_helper(), "devices"], capture_output=True, text=True)
+    helper = _runnable(_ensure_helper())
+    proc = subprocess.run([helper, "devices"], capture_output=True, text=True)
+    if proc.returncode == -9:
+        raise OSError(126, _gatekeeper_hint(helper))
     if proc.returncode != 0:
         raise OSError(proc.returncode, proc.stderr.strip() or "discprobe-spt devices failed")
     try:
@@ -127,7 +184,7 @@ class MacScsiDevice:
             chosen = drives[0]
         self.info = chosen
         self.name = chosen["name"]
-        args = [_ensure_helper(), "serve", "--device", self.name]
+        args = [_runnable(_ensure_helper()), "serve", "--device", self.name]
         self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, bufsize=0)
         self._in = self._proc.stdin.fileno()
@@ -158,6 +215,8 @@ class MacScsiDevice:
                 detail = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()
             except (OSError, ValueError):
                 detail = ""
+            if not detail and proc.returncode == -9:
+                detail = _gatekeeper_hint(helper_path())
             self._proc = None
         raise OSError(5, f"{why} for {self.name}" + (f": {detail}" if detail else ""))
 
