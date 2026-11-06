@@ -86,6 +86,9 @@ CD 每扇区有 98 个 588 位通道帧（57,624 位）。`geo` 以扇区末尾�
 参见 [Ashley-QwQ/disc-probe 的 CD 物理模型](https://github.com/Ashley-QwQ/disc-probe/blob/934bb784202dfadc420aa39355a0f31ac08e7614/docs/CD_PHYSICAL_MODEL.md)。
 结果是测量跨度内的相对螺旋几何；读取计时不能单独确定绝对沿轨偏移。CD 结果不支持 `disexport`。
 
+已用 Apple SuperDrive（固件 2.00）和 Verbatim Digital Vinyl AZO CD-R 完成 36 个测点。
+见 [实测结果、测点和复算命令](evidence/mac/cd-r/README.md)。
+
 ## 三个实验在做什么
 
 ### `timing`
