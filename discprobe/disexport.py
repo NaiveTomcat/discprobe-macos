@@ -202,7 +202,10 @@ def export(geo_summary: str, total_sectors: int, out_path: str, r_lo: float, r_h
            preset_id: str, name: str) -> dict:
     import json
     with open(geo_summary, encoding="utf-8") as f:
-        geo = json.load(f)["fit"]
+        summary = json.load(f)
+    geo = summary["fit"]
+    if geo.get("media", "dvd") != "dvd" or (summary.get("setup") or {}).get("family") == "cd":
+        raise ValueError("disexport only supports DVD geometry; CD summaries cannot be exported")
     fit = fit_preset(geo["u"], geo["v"], geo["bit_nm_assumed"], total_sectors, r_lo, r_hi)
     desc = (f"Drive-timing calibration (discprobe); fitted over {r_lo}-{r_hi} mm, "
             f"max angle difference to the measured map {fit['max_angle_diff_deg']:.3f} deg")

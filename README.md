@@ -75,6 +75,20 @@ python3 -m discprobe disexport \
 **测量期间这张盘不能挂载**，也不能有别的程序在读它：helper 要拿到独占访问，会先用 DiskArbitration
 卸一次盘；还失败就手动 `diskutil unmountDisk /dev/disk10`。同一台驱动器同时只能有一个 discprobe 进程。
 
+### Mode 1 数据 CD
+
+对已经封盘的单会话、单数据轨 Mode 1 CD，可直接运行 `python3 -m discprobe geo --drive disk10`。
+`geo` 自动识别介质；CD 默认请求 1411 kB/s，仍需要光驱实际保持恒定转速（CAV）。
+光驱必须报告可确认的轨道类型和已记录范围。探测、预热、缓存测试和驱逐都限制在该范围内；
+`--ranges` 可进一步限制梯子的测量点（结束 LBA 不包含在内）。音频、混合模式、Mode 2 和多会话 CD 暂不支持。
+
+CD 每扇区有 98 个 588 位通道帧（57,624 位）。`geo` 以扇区末尾再加 108 个 CIRC 帧作为读取完成位置的模型，
+参见 [Ashley-QwQ/disc-probe 的 CD 物理模型](https://github.com/Ashley-QwQ/disc-probe/blob/934bb784202dfadc420aa39355a0f31ac08e7614/docs/CD_PHYSICAL_MODEL.md)。
+结果是测量跨度内的相对螺旋几何；读取计时不能单独确定绝对沿轨偏移。CD 结果不支持 `disexport`。
+
+已用 Apple SuperDrive（固件 2.00）和 Verbatim Digital Vinyl AZO CD-R 完成 36 个测点。
+见 [实测结果、测点和复算命令](evidence/mac/cd-r/README.md)。
+
 ## 三个实验在做什么
 
 ### `timing`

@@ -87,6 +87,7 @@ class TimingProbe:
         self.summary: dict = {}
         self._experiment = ""
         self._evict_cursor = 0
+        self._cd_bounds = None
 
     # ------------------------------------------------------------ plumbing
 
@@ -94,6 +95,7 @@ class TimingProbe:
         return self.dev.execute(cdb, alloc, DATA_IN if alloc else DATA_NONE)
 
     def _read(self, lba: int, count: int = 1, fua: bool = False, label: str = ""):
+        self._check_cd_read(lba, count)
         if self.method == "readcd":
             cdb, size = mmc.read_cd(lba, count), 2352 * count
         elif self.method == "read10":
@@ -111,11 +113,15 @@ class TimingProbe:
     def _flush(self, lba: int):
         # Zero-length READ(12) with FUA, as redumper does before re-reading a sector;
         # whether a given firmware drops its cached copy is what the cache test checks.
+        self._check_cd_read(lba, 1)
         res = self._cmd(mmc.read12(lba, 0, fua=True), 0)
         self._record("flush", lba, "read12-0-fua", True, res)
         return res
 
     def _align(self, fraction: float) -> int:
+        if self._cd_bounds:
+            lo, hi = self._cd_bounds
+            return lo + int((hi - lo - 1) * fraction)
         lba = int(self.last_lba * fraction)
         lba -= lba % self.block
         return max(0, min(lba, self.last_lba - self.block + 1))
@@ -123,12 +129,15 @@ class TimingProbe:
     def _evict(self):
         chunk = 32 if self.method != "readcd" else 27
         start = self._align(0.6)
+        region = EVICT_REGION_SECTORS
+        if self._cd_bounds:
+            region = min(region, self._cd_bounds[1] - start)
         done = 0
         while done < self.evict_sectors:
-            lba = start + self._evict_cursor
-            self._read(lba, chunk, label="evict")
-            self._evict_cursor = (self._evict_cursor + chunk) % EVICT_REGION_SECTORS
-            done += chunk
+            count = min(chunk, region - self._evict_cursor) if self._cd_bounds else chunk
+            self._read(start + self._evict_cursor, count, label="evict")
+            self._evict_cursor = (self._evict_cursor + count) % region
+            done += count
 
     def _pause(self):
         # A random idle time before each timed read. Without it, back-to-back re-reads of
@@ -159,19 +168,61 @@ class TimingProbe:
 
     # ------------------------------------------------------------ steps
 
-    def setup(self):
+    def _check_cd_read(self, lba, count):
+        if self._cd_bounds:
+            lo, hi = self._cd_bounds
+            if not (lo <= lba < lba + count <= hi):
+                raise NoReadableDisc(f"CD read {lba}+{count} is outside the confirmed Mode 1 track")
+
+    def _mode1_bounds(self, toc, capacity):
+        # Use the declared lengths: some drives pad responses to the allocation size.
+        def payload(res):
+            return res.data[:int.from_bytes(res.data[:2], "big") + 2] if res.ok else b""
+
+        toc_data = payload(toc)
+        tracks = mmc.parse_toc(toc_data)["tracks"]
+        disc = mmc.parse_disc_information(payload(self._cmd(mmc.read_disc_information(), 34)))
+        if (len(toc_data) != 20 or toc_data[2:4] != b"\x01\x01"
+                or len(tracks) != 2 or tracks[0]["track"] != 1 or not tracks[0]["data"]
+                or tracks[1]["track"] != 0xAA or disc.get("sessions") != 1
+                or disc.get("disc_status") != "complete"):
+            raise NoReadableDisc("CD geometry requires a finalized single-session, single-track data CD")
+
+        track = mmc.parse_track_information(payload(self._cmd(mmc.read_track_information(1), 48)))
+        start = tracks[0]["start_lba"]
+        last = capacity["last_lba"]
+        if (start < 0 or last is None or capacity["block_length"] != 2048
+                or track.get("track") != 1 or track["session"] != 1 or track["blank"]
+                or track["data_mode"] != 1 or track["track_start"] != start):
+            raise NoReadableDisc("could not confirm a recorded Mode 1 CD track with 2048-byte sectors")
+        stop = min(start + track["track_size"], tracks[1]["start_lba"], last + 1)
+        if track["lra_valid"]:
+            stop = min(stop, track["last_recorded"] + 1)
+        if stop - start <= 1000:
+            raise NoReadableDisc("no usable recorded Mode 1 CD range")
+        return start, stop
+
+    def setup(self, *, geometry=False, default_speed=False):
         self._experiment = "setup"
         self._cmd(mmc.test_unit_ready(), 0)
         cfg = self._cmd(mmc.get_configuration(), 4096)
         profile = mmc.parse_configuration(cfg.data).get("current_profile") if cfg.ok else None
         self.family = mmc.media_family(profile)
         self.block = mmc.block_sectors(self.family)
+        if geometry and self.family not in ("cd", "dvd"):
+            raise NoReadableDisc("could not identify CD or DVD media for geometry measurement")
+        if default_speed:
+            self.speed_kbs = 1411 if self.family == "cd" else 5540
 
         cap = self._cmd(mmc.read_capacity(), 8)
-        self.last_lba = mmc.parse_capacity(cap.data)["last_lba"] if cap.ok else None
+        capacity = mmc.parse_capacity(cap.data if cap.ok else b"")
+        self.last_lba = capacity["last_lba"]
         toc = self._cmd(mmc.read_toc(0), 2048)
         tracks = mmc.parse_toc(toc.data)["tracks"] if toc.ok else []
         audio = bool(tracks) and not tracks[0]["data"]
+        if geometry and self.family == "cd":
+            self._cd_bounds = self._mode1_bounds(toc, capacity)
+            self.last_lba = self._cd_bounds[1] - 1
         if self.last_lba is None and tracks and tracks[-1]["track"] == 0xAA:
             self.last_lba = tracks[-1]["start_lba"] - 1
         if not self.last_lba or self.last_lba < 1000:
@@ -193,6 +244,8 @@ class TimingProbe:
                                  "profile_name": mmc.PROFILES.get(profile), "family": self.family,
                                  "block_sectors": self.block, "last_lba": self.last_lba,
                                  "first_track_audio": audio, "read_method": self.method}
+        if self._cd_bounds:
+            self.summary["setup"]["readable_lba_range"] = self._cd_bounds
         self.log(f"Disc: {self.summary['setup']['profile_name']}, last LBA {self.last_lba}, "
                  f"reading with {self.method}")
 

@@ -133,12 +133,17 @@ def _dtheta(n: float, u: float, v: float) -> tuple[float, float]:
     return -2 * n / (s * (s + u)), -n * n / (math.pi * s * (s + u) ** 2)
 
 
-def _report(u, v, cov, coarse, layout: CalLayout, n_of_r) -> dict:
+def _geometry_report(u, v, coarse, layout: CalLayout) -> dict:
     b_nm = layout.bit_nm
-    out = {"u": u, "v": v, "coarse_u": coarse[0], "coarse_v": coarse[1],
-           "r0_mm_at_bit": u * b_nm * 1e-6, "pitch_um_at_bit": v * b_nm * 1e-3,
-           "bit_nm_assumed": b_nm,
-           "note": "angles depend only on u and v; any bit length with r0 = u*b and pitch = v*b gives the same image"}
+    return {"u": u, "v": v, "coarse_u": coarse[0], "coarse_v": coarse[1],
+            "r0_mm_at_bit": u * b_nm * 1e-6, "pitch_um_at_bit": v * b_nm * 1e-3,
+            "bit_nm_assumed": b_nm,
+            "note": "angles depend only on u and v; any bit length with r0 = u*b and pitch = v*b gives the same image"}
+
+
+def _report(u, v, cov, coarse, layout: CalLayout, n_of_r) -> dict:
+    out = _geometry_report(u, v, coarse, layout)
+    b_nm = layout.bit_nm
     b_mm = b_nm * 1e-6
     out["dis_equivalent"] = {
         "bit_nm": b_nm, "inner_radius_mm": u * b_mm,

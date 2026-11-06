@@ -13,7 +13,7 @@ import math
 import random
 
 from . import mmc
-from .geometry import DVD_SECTOR_MM, ONE_X_MM_S, Spiral
+from .geometry import CD_SECTOR_MM, DVD_SECTOR_MM, ONE_X_MM_S, Spiral
 from .scsi import ScsiResult, Sense, check_allowed
 
 TWO_PI = 2.0 * math.pi
@@ -23,7 +23,8 @@ class SimDrive:
     def __init__(self, mode: str = "cav", fua_honoured: bool = True, flush_honoured: bool = False, seed: int = 1,
                  jitter_us: float = 60.0, outlier_rate: float = 0.01,
                  rev_period_ms: float = 6.6, clv_speed_x: float = 8.0,
-                 capacity: int = 2295104, cache_blocks: int = 6, reread_delay_ms: float = 0.0):
+                 capacity: int | None = None, cache_blocks: int = 6, reread_delay_ms: float = 0.0,
+                 media: str = "dvd"):
         self.name = f"SIM-{mode}{'' if fua_honoured else '-nofua'}{'-flush' if flush_honoured else ''}"
         self.mode = mode
         self.fua_honoured = fua_honoured
@@ -31,11 +32,13 @@ class SimDrive:
         self.rng = random.Random(seed)
         self.jitter_s = jitter_us * 1e-6
         self.outlier_rate = outlier_rate
-        self.capacity = capacity
-        self.block = 16
-        # Off-nominal: 0.735 um pitch, 133.6 nm channel bit, start radius 23.93 mm.
-        self.spiral = Spiral(23.93, 0.735e-3, DVD_SECTOR_MM * 133.6 / 133.3)
-        self.clv_speed_mm_s = clv_speed_x * ONE_X_MM_S["dvd"]
+        self.media = media
+        cd = media == "cd"
+        self.capacity = capacity if capacity is not None else (350000 if cd else 2295104)
+        self.block = 1 if cd else 16
+        self.spiral = (Spiral(24.85, 1.50e-3, CD_SECTOR_MM) if cd
+                       else Spiral(23.93, 0.735e-3, DVD_SECTOR_MM * 133.6 / 133.3))
+        self.clv_speed_mm_s = clv_speed_x * ONE_X_MM_S[media]
         self.cache_blocks = cache_blocks
         # Fixed firmware overhead before a media read can start; several revolutions on
         # the GH70N, so back-to-back re-reads all span the same whole number of turns.
@@ -76,9 +79,12 @@ class SimDrive:
 
     # ------------------------------------------------------------ geometry truth
 
+    def _read_end(self, block_end):
+        return block_end + 108 / 98 if self.media == "cd" else block_end
+
     def block_end_angle(self, lba: int, count: int = 1) -> float:
         last_block_end = ((lba + count - 1) // self.block + 1) * self.block
-        return self.spiral.angle(last_block_end) % TWO_PI
+        return self.spiral.angle(self._read_end(last_block_end)) % TWO_PI
 
     def true_phase_deg(self, ref_lba: int, target_lba: int) -> float:
         return math.degrees((self.block_end_angle(target_lba) - self.block_end_angle(ref_lba)) % TWO_PI)
@@ -126,12 +132,17 @@ class SimDrive:
                 d[32:36] = b"0.01"
                 data = bytes(d)
             elif op == 0x46:
-                data = bytes([0, 0, 0, 4, 0, 0, 0x00, 0x11])
+                data = bytes([0, 0, 0, 4, 0, 0, 0x00, 0x0A if self.media == "cd" else 0x11])
             elif op == 0x25:
                 data = (self.capacity - 1).to_bytes(4, "big") + (2048).to_bytes(4, "big")
             elif op == 0x43 and (cdb[2] & 0x0F) == 0:
                 data = bytes([0, 18, 1, 1, 0, 0x14, 1, 0, 0, 0, 0, 0,
                               0, 0x14, 0xAA, 0, *self.capacity.to_bytes(4, "big")])
+            elif self.media == "cd" and op == 0x51:
+                data = bytes([0, 32, 0x0E, 1, 1, 1, 1] + [0] * 27)
+            elif self.media == "cd" and op == 0x52:
+                data = bytes([0, 34, 1, 1, 0, 4, 1, 0] + [0] * 16
+                             + list(self.capacity.to_bytes(4, "big")) + [0] * 8)
             elif op in (0x00, 0xBB):
                 pass
             else:
@@ -161,7 +172,7 @@ class SimDrive:
         # The head sits at a fixed lab angle; disc angle theta is under it when the
         # unwrapped spindle phase equals theta modulo 2*pi.
         theta_start = self.spiral.angle(start)
-        theta_end = self.spiral.angle(end)
+        theta_end = self.spiral.angle(self._read_end(end))
         phase_now = self._phase(t_arrive)
         wait = (theta_start - phase_now) % TWO_PI
         t_start_pass = self._time_to_reach(t_arrive, phase_now + wait)

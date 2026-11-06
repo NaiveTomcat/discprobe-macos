@@ -1,12 +1,12 @@
-"""`geo`: measure the spiral geometry of a burned DVD from read timing ("ladder").
+"""`geo`: measure the spiral geometry of a DVD or Mode 1 CD from read timing.
 
 Under constant rotation, the spindle phase of a target read's completion relative to
-a reference read's is the track angle between the ends of the two ECC blocks, plus a
+a reference read's is the track angle between the two modeled read ends, plus a
 constant c (decode latency difference, ideally ~0):
 
     phi(X) = Theta(n_X) - Theta(n_R) + c  (mod 360),   Theta(n) = 2n / (S + u),  S = sqrt(u^2 + v n / pi)
 
-with n the channel bit at the end of the block and u = r0/b, v = p/b as in calib.py.
+with n the channel bit at the read end and u = r0/b, v = p/b as in calib.py.
 Only the phase modulo 360 is measured, and the nominal geometry mispredicts the angle
 between distant sectors by thousands of turns, so targets are taken as a ladder:
 
@@ -31,7 +31,7 @@ import os
 import statistics
 
 from . import analysis, linalg
-from .calib import SECTOR_BITS, CalLayout, _dtheta, _report, theta
+from .calib import SECTOR_BITS, CalLayout, _dtheta, _geometry_report, _report, theta
 from .timing import TimingProbe
 
 SAFE_DEG = 25.0
@@ -45,38 +45,66 @@ PERIOD_TOL = 2e-3
 FIRST_TURNS = (1.5, 4.0)    # first rungs, in turns from the reference
 SETTLE_READS = 16
 MIN_SPACING_SECTORS = 4000  # about a third of a millimetre of radius
+# CD channel frames and the CIRC read-end model: Ashley-QwQ/disc-probe,
+# docs/CD_PHYSICAL_MODEL.md. The tail is a model, not a measured drive offset.
+CD_FRAME_BITS = 588
+CD_SECTOR_BITS = 98 * CD_FRAME_BITS
+CD_READ_TAIL_FRAMES = 108
 
 
 class Ladder:
-    def __init__(self, dev, ranges=None, r0_mm=24.0, pitch_um=0.74, bit_nm=133.3, reps=24,
-                 max_targets=22, sigma_u=0.01, sigma_v=0.03, speed_kbs=5540, ref_lba=None,
-                 host_delay_ms=25.0, log=print, seed=1):
+    def __init__(self, dev, ranges=None, r0_mm=None, pitch_um=None, bit_nm=None, reps=None,
+                 max_targets=None, sigma_u=None, sigma_v=None, speed_kbs="default", ref_lba=None,
+                 host_delay_ms=None, log=print, seed=1):
         self.dev = dev
         self.ranges_arg = ranges
-        self.prior = CalLayout(r0_mm=r0_mm, pitch_um=pitch_um, bit_nm=bit_nm)
-        self.u0, self.v0 = self.prior.u0, self.prior.v0
-        self.sig_u, self.sig_v = sigma_u * self.u0, sigma_v * self.v0
-        self.reps = reps
-        self.max_targets = max_targets
+        self.prior_args = r0_mm, pitch_um, bit_nm, sigma_u, sigma_v
+        self.reps_arg = reps
+        self.max_targets_arg = max_targets
         self.ref_arg = ref_lba
         self.log = log
-        self.tp = TimingProbe(dev, log=lambda *_: None, reps=reps, speed_kbs=speed_kbs,
-                              host_delay_ms=host_delay_ms, seed=seed)
+        self.default_speed = speed_kbs == "default"
+        self.host_delay_arg = host_delay_ms
+        self.tp = TimingProbe(dev, log=lambda *_: None, speed_kbs=None if self.default_speed else speed_kbs,
+                              seed=seed)
         self.targets: list[dict] = []
-        self.u, self.v, self.c = self.u0, self.v0, 0.0
         self.cov = None
 
     # ------------------------------------------------------------ geometry helpers
 
+    def _set_model(self, media: str):
+        self.media = media
+        cd = media == "cd"
+        self.block = 1 if cd else 16
+        self.spacing = 64 if cd else MIN_SPACING_SECTORS
+        defaults = ((25.0, 1.6, 16e6 / CD_SECTOR_BITS, 0.08, 0.15) if cd
+                    else (24.0, 0.74, 133.3, 0.01, 0.03))
+        r0, pitch, bit, sigma_u, sigma_v = (d if a is None else a for a, d in zip(self.prior_args, defaults))
+        self.prior = CalLayout(r0_mm=r0, pitch_um=pitch, bit_nm=bit)
+        self.u0, self.v0 = self.prior.u0, self.prior.v0
+        self.sig_u, self.sig_v = sigma_u * self.u0, sigma_v * self.v0
+        self.u, self.v, self.c = self.u0, self.v0, 0.0
+        self.reps = self.reps_arg if self.reps_arg is not None else (32 if cd else 24)
+        self.max_targets = self.max_targets_arg if self.max_targets_arg is not None else (36 if cd else 22)
+        delay = self.host_delay_arg if self.host_delay_arg is not None else (50.0 if cd else 25.0)
+        self.tp.host_delay_s = delay / 1e3
+        if cd:
+            # Keep timed reads close enough for the reference period fit on slow CDs.
+            self.tp.evict_sectors = 256
+
     def _n_end(self, lba: int) -> float:
-        """Channel bit at the end of the ECC block holding lba (where the read completes)."""
-        return float((lba // 16 + 1) * 16 * SECTOR_BITS)
+        """Channel bit at the modeled end of a one-sector read."""
+        if self.media == "cd":
+            return float((lba + 1) * CD_SECTOR_BITS + CD_READ_TAIL_FRAMES * CD_FRAME_BITS)
+        return float((lba // self.block + 1) * self.block * SECTOR_BITS)
 
     def _lba_at_turns(self, turns: float) -> int:
         th = theta(self.n_ref, self.u, self.v) + 2 * math.pi * turns
         s = self.u + self.v * th / (2 * math.pi)
         n = math.pi * (s * s - self.u * self.u) / self.v
-        return int(n // SECTOR_BITS) // 16 * 16
+        if self.media == "cd":
+            return int((n - CD_READ_TAIL_FRAMES * CD_FRAME_BITS) // CD_SECTOR_BITS) - 1
+        return int(n // SECTOR_BITS) // self.block * self.block
 
     def _predict(self, n):
         return float(theta(n, self.u, self.v) - theta(self.n_ref, self.u, self.v)) + self.c
@@ -93,7 +121,7 @@ class Ladder:
         """Variance of the accumulated angle across the readable range if lba were measured
         next with the typical per-rung uncertainty (rank-one covariance update)."""
         lo = self._n_end(min(a for a, _ in self.ranges))
-        hi = self._n_end(max(b for _, b in self.ranges) - 16)
+        hi = self._n_end(max(b for _, b in self.ranges) - self.block)
         du_lo, dv_lo = _dtheta(lo, self.u, self.v)
         du_hi, dv_hi = _dtheta(hi, self.u, self.v)
         g = [du_hi - du_lo, dv_hi - dv_lo, 0.0]
@@ -112,8 +140,8 @@ class Ladder:
         """Nearest block-aligned LBA inside the readable ranges."""
         best = None
         for a, b in self.ranges:
-            x = min(max(lba, a), b - 16)
-            x -= x % 16
+            x = min(max(lba, a), b - self.block)
+            x -= x % self.block
             if best is None or abs(x - lba) < abs(best - lba):
                 best = x
         return best
@@ -221,13 +249,13 @@ class Ladder:
     def _candidates(self) -> list[int]:
         lo = min(a for a, _ in self.ranges)
         hi = max(b for _, b in self.ranges)
-        grid = [int(lo + (hi - 16 - lo) * i / 39) for i in range(40)]
+        grid = [int(lo + (hi - self.block - lo) * i / 39) for i in range(40)]
         turns = [s * 2 ** k for k in range(0, 18) for s in (1, -1)]
         near = [self._lba_at_turns(t) for t in turns]
         out = set()
         for lba in list(grid) + near:
             x = self._allowed(int(lba))
-            if x is not None and abs(x - self.ref) >= 16:
+            if x is not None and abs(x - self.ref) >= self.block:
                 out.add(x)
         return sorted(out)
 
@@ -239,16 +267,20 @@ class Ladder:
 
     def run(self) -> dict:
         tp = self.tp
-        tp.setup()
+        tp.setup(geometry=True, default_speed=self.default_speed)
+        self._set_model(tp.family)
         tp.cache_test()
         if tp.strategy not in ("fua", "plain"):
             self.log(f"warning: cache strategy {tp.strategy}; phases will be noisier")
-        last = tp.last_lba
+        lo, hi = tp.summary["setup"].get("readable_lba_range", (0, tp.last_lba + 1))
         if self.ranges_arg:
-            self.ranges = [(max(0, a), min(b, last + 1)) for a, b in self.ranges_arg]
+            self.ranges = [(max(lo, a), min(b, hi)) for a, b in self.ranges_arg]
         else:
-            self.ranges = [(int(last * 0.03), int(last * 0.85))]
-        self.ranges = [(a - a % 16, b - b % 16) for a, b in self.ranges if b - a > 64]
+            span = hi - lo - 1
+            self.ranges = [(lo + int(span * 0.03), lo + int(span * 0.85))]
+        self.ranges = [(a - a % self.block, b - b % self.block) for a, b in self.ranges if b - a > 64]
+        if not self.ranges:
+            raise RuntimeError("no usable LBA range for the geometry ladder")
         if self.ref_arg is not None:
             self.ref = self._allowed(self.ref_arg)
         else:
@@ -258,9 +290,14 @@ class Ladder:
         self.log(f"Reference LBA {self.ref}; readable ranges {self.ranges}")
         self.settle()
 
-        # First rungs: a turn or two away, where the nominal model is good to a few degrees.
-        for i, turns in enumerate(FIRST_TURNS):
-            lba = self._allowed(self._lba_at_turns(turns))
+        # CD's broader priors need closer first rungs. Near the outer edge, go inward.
+        first_turns = (0.5, 1.5) if self.media == "cd" else FIRST_TURNS
+        if self.media == "cd" and self._lba_at_turns(first_turns[-1]) >= max(b for _, b in self.ranges):
+            first_turns = tuple(-t for t in first_turns)
+        first_lbas = [self._allowed(self._lba_at_turns(t)) for t in first_turns]
+        if self.media == "cd" and len({self.ref, *first_lbas}) != 3:
+            raise RuntimeError("could not place the first CD rungs; choose a reference inside the LBA range")
+        for i, (turns, lba) in enumerate(zip(first_turns, first_lbas)):
             m = self._measure_retry(lba)
             if m is None:
                 raise RuntimeError(f"could not measure LBA {lba} near the reference")
@@ -277,7 +314,7 @@ class Ladder:
         while len(self.targets) < self.max_targets:
             # Skip candidates next to one already measured: a second point there adds little.
             cands = [c for c in self._candidates()
-                     if c not in tried and min(abs(c - t) for t in tried) >= MIN_SPACING_SECTORS]
+                     if c not in tried and min(abs(c - t) for t in tried) >= self.spacing]
             if not cands:
                 break
             sig = {c: self._sigma_pred_deg(self._n_end(c)) for c in cands}
@@ -317,7 +354,13 @@ class Ladder:
         return self.result()
 
     def result(self) -> dict:
-        rep = _report(self.u, self.v, self.cov, (self.u, self.v), self.prior, None)
+        if self.media == "cd":
+            rep = _geometry_report(self.u, self.v, (self.u, self.v), self.prior)
+            rep.update(media="cd", sector_bits=CD_SECTOR_BITS, read_tail_frames=CD_READ_TAIL_FRAMES,
+                       read_completion_model_measured=False, u_sigma=math.sqrt(self.cov[0][0]),
+                       v_sigma=math.sqrt(self.cov[1][1]))
+        else:
+            rep = _report(self.u, self.v, self.cov, (self.u, self.v), self.prior, None)
         n_meas = [t["n"] for t in self.targets] + [self.n_ref]
         lo, hi = min(n_meas), max(n_meas)
         du_lo, dv_lo = _dtheta(lo, self.u, self.v)
