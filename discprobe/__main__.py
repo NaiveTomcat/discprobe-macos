@@ -119,12 +119,15 @@ def cmd_geo(args):
     if not args.sim:
         _backend().raise_priority()
     dev = _open(args)
+    speed = args.speed if args.speed is not None else "default"
     ladder = Ladder(dev, ranges=ranges, r0_mm=args.r0_mm, pitch_um=args.pitch_um, bit_nm=args.bit_nm,
                     reps=args.reps, max_targets=args.max_targets, ref_lba=args.ref_lba,
-                    speed_kbs=None if args.sim else args.speed, host_delay_ms=args.host_delay_ms)
+                    speed_kbs=None if args.sim else speed, host_delay_ms=args.host_delay_ms)
     out = _outdir(args, "geo", dev)
     try:
         res = ladder.run()
+    except timing.NoReadableDisc as e:
+        sys.exit(f"stopped: {e}")
     except RuntimeError as e:
         print(f"stopped: {e}")
         res = None
@@ -139,8 +142,8 @@ def cmd_geo(args):
         print(f"With bit length {res['bit_nm_assumed']} nm: r0 {res['r0_mm_at_bit']:.5f} mm, "
               f"pitch {res['pitch_um_at_bit']:.6f} um")
         print(f"Angle uncertainty across the measured span {res['measured_span_mm'][0]}-"
-              f"{res['measured_span_mm'][1]} mm: {res['angle_sigma_measured_span_deg']:.3f} deg (1 sigma); "
-              f"across 24-58 mm: {res.get('angle_sigma_deg', float('nan')):.2f} deg")
+              f"{res['measured_span_mm'][1]} mm: {res['angle_sigma_measured_span_deg']:.3f} deg (1 sigma)"
+              + (f"; across 24-58 mm: {res['angle_sigma_deg']:.2f} deg" if "angle_sigma_deg" in res else ""))
     print(f"targets.csv, summary.json, events.csv: {os.path.abspath(out)}")
 
 
@@ -149,7 +152,10 @@ def cmd_geo(args):
 
 def cmd_disexport(args):
     from .disexport import export
-    out = export(args.geo, args.sectors, args.output, args.r_min, args.r_max, args.id, args.name)
+    try:
+        out = export(args.geo, args.sectors, args.output, args.r_min, args.r_max, args.id, args.name)
+    except ValueError as e:
+        sys.exit(str(e))
     f = out["fit"]
     print(f"inner {f['innerRadiusMm']:.9f} mm, outer {f['outerRadiusMm']:.9f} mm, pitch shape "
           f"{f['pitchLinear']:.3e} {f['pitchQuadratic']:.3e} {f['pitchCubic']:.3e}")
@@ -213,17 +219,18 @@ def main(argv=None):
                     help="sectors read elsewhere before each measurement when the cache cannot be bypassed")
     sp.set_defaults(func=cmd_timing)
 
-    sp = sub.add_parser("geo", help="measure the spiral geometry of a burned DVD from read timing (ladder)")
+    sp = sub.add_parser("geo", help="measure the spiral geometry of a DVD or Mode 1 CD from read timing")
     common(sp)
-    sp.add_argument("--speed", type=int, default=5540, help="read speed to fix, kB/s (default 4x = 5540)")
-    sp.add_argument("--ranges", help="readable LBA ranges a-b,c-d (default 3-85 %% of the recorded area)")
+    sp.add_argument("--speed", type=int, metavar="KBPS",
+                    help="read speed to fix (default: DVD 5540 kB/s, CD 1411 kB/s)")
+    sp.add_argument("--ranges", help="ladder LBA ranges a-b,c-d, end exclusive (default 3-85 %% of the recorded area)")
     sp.add_argument("--ref-lba", type=int)
-    sp.add_argument("--reps", type=int, default=24, help="reference/target read pairs per rung")
-    sp.add_argument("--max-targets", type=int, default=22)
-    sp.add_argument("--host-delay-ms", type=float, default=25.0)
-    sp.add_argument("--r0-mm", type=float, default=24.0, help="prior geometry (loose)")
-    sp.add_argument("--pitch-um", type=float, default=0.74)
-    sp.add_argument("--bit-nm", type=float, default=133.3)
+    sp.add_argument("--reps", type=int, help="reference/target read pairs per rung (DVD 24, CD 32)")
+    sp.add_argument("--max-targets", type=int, help="maximum rungs (DVD 22, CD 36)")
+    sp.add_argument("--host-delay-ms", type=float, help="maximum random host delay (DVD 25, CD 50 ms)")
+    sp.add_argument("--r0-mm", type=float, help="prior radius (DVD 24, CD 25 mm)")
+    sp.add_argument("--pitch-um", type=float, help="prior pitch (DVD 0.74, CD 1.6 um)")
+    sp.add_argument("--bit-nm", type=float, help="assumed channel bit length (DVD 133.3, CD 277.66 nm)")
     sp.set_defaults(func=cmd_geo)
 
     sp = sub.add_parser("disexport", help="fit the measured angle map as a DiscImageStudio DVD preset (cubic pitch)")

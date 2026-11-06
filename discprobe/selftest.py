@@ -4,6 +4,9 @@ simulated drive, compared against the simulator's true geometry."""
 from __future__ import annotations
 
 import math
+from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from . import analysis, mmc, timing
 from .scsi import check_allowed
@@ -143,6 +146,71 @@ def _ladder_abort(c: Checker):
         c.check("whole-turn" in str(e), f"stopped after {len(lad.targets)} rungs: {str(e)[:60]}...")
 
 
+def _cd_geometry(c: Checker):
+    print("Mode 1 CD geometry")
+    from .calib import theta
+    from .disexport import export
+    from .geo import Ladder, write_outputs
+
+    sim = SimDrive(media="cd", seed=7, rev_period_ms=28.7, fua_honoured=False, jitter_us=45.0)
+    lad = Ladder(sim, log=lambda *_: None)
+    res = lad.run()
+    lbas = [i * 0.85 * sim.capacity / 100 for i in range(101)]
+    err = [math.degrees(theta(lba * 57624, lad.u, lad.v) - sim.spiral.angle(lba)) for lba in lbas]
+    span = max(err) - min(err)
+    c.check(len(lad.targets) == 36 and lad.tp.strategy == "evict" and span < 1.0,
+            f"{len(lad.targets)} CD rungs with eviction, angle error over 0-85 % of the disc {span:.3f} deg")
+    c.check(res["media"] == "cd" and res["sector_bits"] == 57624 and res["read_tail_frames"] == 108
+            and "dis_equivalent" not in res, "summary identifies the CD model without DVD preset data")
+    with TemporaryDirectory() as out:
+        write_outputs(lad, out)
+        preset = Path(out) / "preset.json"
+        try:
+            export(str(Path(out) / "summary.json"), sim.capacity, preset, 26.0, 54.0, "cd", "CD")
+            c.check(False, "DVD export accepted a CD summary")
+        except ValueError as e:
+            c.check("only supports DVD" in str(e) and not preset.exists(), "DVD export rejects the CD summary")
+
+    class ShortCD(SimDrive):
+        def __init__(self):
+            super().__init__(media="cd", capacity=1301)
+            self.reads = []
+            self.sessions, self.data_mode = 1, 1
+
+        def execute(self, cdb, *args):
+            op = cdb[0]
+            if op in (0x28, 0xA8):
+                count = cdb[7:9] if op == 0x28 else cdb[6:10]
+                self.reads.append((int.from_bytes(cdb[2:6], "big"), int.from_bytes(count, "big")))
+            res = super().execute(cdb, *args)
+            if op == 0x43:
+                return replace(res, data=res.data.ljust(2048, b"\x00"))
+            if op == 0x51:
+                return replace(res, data=res.data[:4] + bytes([self.sessions]) + res.data[5:])
+            if op == 0x52:
+                return replace(res, data=res.data[:6] + bytes([self.data_mode, 2]) + res.data[8:28]
+                               + (1023).to_bytes(4, "big") + res.data[32:])
+            return res
+
+    drive = ShortCD()
+    probe = timing.TimingProbe(drive, evict_sectors=512, log=lambda *_: None)
+    probe.setup(geometry=True)
+    probe.cache_test()
+    probe._evict()  # wraps in a track shorter than the nominal eviction region
+    c.check(max(lba + count for lba, count in drive.reads) == 1024
+            and all(0 <= lba < lba + count <= 1024 for lba, count in drive.reads),
+            "probe, warmup, cache test and eviction stay inside the recorded CD range")
+
+    for field, kind in (("sessions", "multisession"), ("data_mode", "Mode 2")):
+        drive = ShortCD()
+        setattr(drive, field, 2)
+        try:
+            Ladder(drive, log=lambda *_: None).run()
+            c.check(False, f"geometry accepted {kind} CD")
+        except timing.NoReadableDisc:
+            c.check(not drive.reads, f"geometry rejects {kind} CD before sector reads")
+
+
 def _disexport(c: Checker):
     print("DiscImageStudio preset export")
     from .disexport import fit_preset
@@ -165,6 +233,7 @@ def run() -> bool:
     _sim_run(c, "clv", True, "fua", "CLV")
     _ladder(c)
     _ladder_abort(c)
+    _cd_geometry(c)
     _disexport(c)
     print(f"\n{'all checks passed' if c.failures == 0 else f'{c.failures} check(s) failed'}")
     return c.failures == 0
